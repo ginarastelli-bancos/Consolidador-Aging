@@ -1,6 +1,6 @@
 """
-🌎 CONSOLIDADOR DE AGING - STREAMLIT APP
-Aplicación web para consolidar archivos aging sin PERSONA/CONSUMIDOR
+🌎 CONSOLIDADOR DE AGING - CON EXCLUSIONES AMPLIADAS
+Aplicación web para consolidar archivos aging excluyendo PERSONA/CONSUMIDOR y clientes específicos
 """
 
 import streamlit as st
@@ -20,6 +20,49 @@ st.set_page_config(
     page_icon="🌎",
     layout="wide"
 )
+
+# ====================================================================
+# LISTA DE CLIENTES A EXCLUIR
+# ====================================================================
+
+CLIENTES_EXCLUIR = {
+    # Argentina
+    'Consumidor Final (AR)',
+    'Responsable Inscripto (AR)', 
+    'Monotributista (AR)',
+    'CONSUMIDOR FINAL COUPON (AR)',
+    'RESPONSABLE INCRIPTO B COUPON (AR)',
+    'MONTRIBUTO COUPON (AR)',
+    'EXENTO COUPON (AR)',
+    'RESPONSABLE INSCRIPTO COUPON (AR)',
+    'Exento (AR)',
+    'CONSUMIDOR FINAL COUPON USD (AR)',
+    
+    # Brasil - Existentes
+    'Pessoa Fisica (BR)',
+    'Pessoa Juridica (BR)', 
+    'Estrangeiros (BR)',
+    'Nao Informado (BR)',
+    'PESSOA FISICA COUPON (BR)',
+    'PESSOA JURIDICA COUPON (BR)',
+    'PESSOA EXT COUPON (BR)',
+    
+    # Brasil - Nuevos (más genéricos)
+    'Pessoa',
+    'Estrangeiros', 
+    'Nao Informado',
+    
+    # Multipos existentes
+    'MULTIPOS AR (BR)',
+    'MULTIPOS MX (BR)', 
+    'MULTIPOS CL (BR)',
+}
+
+PALABRAS_EXCLUIR = {
+    'PERSONA',
+    'CONSUMIDOR',
+    'MULTIPOS'
+}
 
 # ====================================================================
 # FUNCIONES DE PROCESAMIENTO
@@ -47,6 +90,28 @@ def extraer_entidad(nombre_archivo):
                 break
     
     return nombre_limpio.upper() if nombre_limpio else 'DESCONOCIDO'
+
+def debe_excluir_registro(row):
+    """
+    Determina si un registro debe ser excluido
+    Retorna: (debe_excluir, razon)
+    """
+    
+    # Convertir fila a texto para buscar palabras clave
+    row_text = ' '.join([str(cell).upper() if cell is not None else '' for cell in row])
+    
+    # 1. Verificar palabras clave (PERSONA, CONSUMIDOR, MULTIPOS)
+    for palabra in PALABRAS_EXCLUIR:
+        if palabra in row_text:
+            return True, f"Contiene palabra: {palabra}"
+    
+    # 2. Verificar nombres exactos de clientes (buscar en toda la fila)
+    for cliente_exacto in CLIENTES_EXCLUIR:
+        if cliente_exacto.upper() in row_text:
+            return True, f"Cliente exacto: {cliente_exacto}"
+    
+    # 3. Si no se encuentra nada, conservar el registro
+    return False, "Registro válido"
 
 def es_fila_valida(row, min_columnas=5):
     """Valida que la fila tenga datos reales"""
@@ -112,8 +177,36 @@ def detectar_columnas_fecha(headers, filas_muestra):
     
     return columnas_fecha
 
+def limpiar_nombres_columnas(headers):
+    """Limpia y asegura que no haya nombres de columnas duplicados"""
+    headers_limpios = []
+    contadores = {}
+    
+    for header in headers:
+        # Convertir None a string
+        if header is None:
+            header = "Columna_Sin_Nombre"
+        else:
+            header = str(header).strip()
+        
+        # Si está vacío, usar nombre genérico
+        if not header:
+            header = "Columna_Vacia"
+        
+        # Si ya existe, agregar número
+        header_original = header
+        if header in contadores:
+            contadores[header] += 1
+            header = f"{header_original}_{contadores[header]}"
+        else:
+            contadores[header] = 0
+        
+        headers_limpios.append(header)
+    
+    return headers_limpios
+
 def procesar_archivo(archivo_bytes, nombre_archivo, progress_bar, status_text):
-    """Procesa un archivo aging"""
+    """Procesa un archivo aging con exclusiones ampliadas"""
     
     entidad = extraer_entidad(nombre_archivo)
     status_text.text(f"📂 Procesando: {nombre_archivo} → Entidad: {entidad}")
@@ -128,17 +221,31 @@ def procesar_archivo(archivo_bytes, nombre_archivo, progress_bar, status_text):
         wb_read = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
         ws = wb_read.active
         
-        # Leer headers
+        # Leer headers y limpiarlos
         headers_originales = [cell.value for cell in ws[2]]
-        headers_nuevos = ['Entidad'] + headers_originales
+        headers_limpios = limpiar_nombres_columnas(headers_originales)
+        
+        # VERIFICAR si ya existe una columna "Entidad"
+        if "Entidad" in headers_limpios:
+            # Si ya existe, no agregar otra
+            headers_nuevos = headers_limpios
+            entidad_ya_existe = True
+        else:
+            # Si no existe, agregar al inicio
+            headers_nuevos = ['Entidad'] + headers_limpios
+            entidad_ya_existe = False
         
         # Procesar filas
         filas_filtradas = []
         total_procesadas = 0
-        excluidos_persona = 0
+        excluidos_por_palabra = 0
+        excluidos_por_cliente = 0
         excluidos_invalidos = 0
         conservados = 0
         filas_consecutivas_vacias = 0
+        
+        # Contadores por razón de exclusión
+        razones_exclusion = {}
         
         max_rows = ws.max_row
         
@@ -162,16 +269,28 @@ def procesar_archivo(archivo_bytes, nombre_archivo, progress_bar, status_text):
             
             filas_consecutivas_vacias = 0
             
-            # Buscar PERSONA/CONSUMIDOR
-            row_text = ' '.join([str(cell).upper() if cell is not None else '' 
-                                for cell in row])
+            # Verificar si debe excluirse
+            debe_excluir, razon = debe_excluir_registro(row)
             
-            if 'PERSONA' in row_text or 'CONSUMIDOR' in row_text:
-                excluidos_persona += 1
+            if debe_excluir:
+                # Contar razones de exclusión
+                if razon in razones_exclusion:
+                    razones_exclusion[razon] += 1
+                else:
+                    razones_exclusion[razon] = 1
+                
+                if "palabra" in razon.lower():
+                    excluidos_por_palabra += 1
+                else:
+                    excluidos_por_cliente += 1
                 continue
             
-            # Conservar
-            fila_con_entidad = [entidad] + list(row)
+            # Agregar entidad solo si no existe ya
+            if entidad_ya_existe:
+                fila_con_entidad = list(row)
+            else:
+                fila_con_entidad = [entidad] + list(row)
+            
             filas_filtradas.append(fila_con_entidad)
             conservados += 1
         
@@ -188,8 +307,10 @@ def procesar_archivo(archivo_bytes, nombre_archivo, progress_bar, status_text):
             'stats': {
                 'procesadas': total_procesadas,
                 'conservadas': conservados,
-                'excluidas_persona': excluidos_persona,
-                'excluidas_invalidas': excluidos_invalidos
+                'excluidas_palabra': excluidos_por_palabra,
+                'excluidas_cliente': excluidos_por_cliente,
+                'excluidas_invalidas': excluidos_invalidos,
+                'razones_exclusion': razones_exclusion
             }
         }
     
@@ -256,29 +377,61 @@ def crear_excel_consolidado(resultados):
 # ====================================================================
 
 st.title("🌎 Consolidador de Aging")
-st.markdown("### Excluye registros con PERSONA/CONSUMIDOR y consolida múltiples países")
+st.markdown("### Excluye PERSONA/CONSUMIDOR y clientes específicos de AR/BR")
 
 st.divider()
 
-# Instrucciones
+# Instrucciones mejoradas
 with st.expander("📋 Instrucciones de uso", expanded=False):
     st.markdown("""
     **Cómo usar esta aplicación:**
     
     1. 📤 **Sube tus archivos aging** (puedes subir varios a la vez)
-    2. ⚙️ **El sistema procesa automáticamente:**
-       - Excluye registros con PERSONA o CONSUMIDOR
+    2. ⚙️ **El sistema excluye automáticamente:**
+       - Registros con palabras: PERSONA, CONSUMIDOR, MULTIPOS
+       - Clientes específicos de Argentina y Brasil (ver lista abajo)
        - Valida que las filas tengan datos reales
-       - Agrega columna "Entidad" al inicio
+       - Agrega columna "Entidad" al inicio (si no existe)
        - Aplica formato de fecha corta (dd/mm/yyyy)
     3. 📥 **Descarga el archivo consolidado**
+    
+    **🚫 Clientes excluidos automáticamente:**
+    
+    **Argentina (AR):**
+    - Consumidor Final, Responsable Inscripto, Monotributista
+    - CONSUMIDOR FINAL COUPON, RESPONSABLE INSCRIPTO COUPON
+    - EXENTO COUPON, Exento, etc.
+    
+    **Brasil (BR):**
+    - Pessoa Fisica, Pessoa Juridica, Estrangeiros
+    - Nao Informado, MULTIPOS, etc.
     
     **Características:**
     - ✅ Consolidación multi-país automática
     - ✅ Formato de fechas automático
-    - ✅ Estadísticas por país
+    - ✅ Estadísticas detalladas por razón de exclusión
     - ✅ Validación de filas
     """)
+
+# Mostrar clientes que se excluyen
+with st.expander("🚫 Lista completa de clientes excluidos", expanded=False):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Argentina (AR):**")
+        ar_clients = [c for c in CLIENTES_EXCLUIR if '(AR)' in c]
+        for client in sorted(ar_clients):
+            st.write(f"• {client}")
+    
+    with col2:
+        st.markdown("**Brasil (BR) y otros:**")
+        br_clients = [c for c in CLIENTES_EXCLUIR if '(BR)' in c or c in ['Pessoa', 'Estrangeiros', 'Nao Informado']]
+        for client in sorted(br_clients):
+            st.write(f"• {client}")
+    
+    st.markdown("**Palabras clave excluidas en cualquier parte:**")
+    for palabra in sorted(PALABRAS_EXCLUIR):
+        st.write(f"• {palabra}")
 
 # Subir archivos
 st.subheader("📤 1. Subir archivos Aging")
@@ -316,7 +469,8 @@ if uploaded_files:
         resultados = []
         stats_totales = {
             'conservadas': 0,
-            'excluidas_persona': 0,
+            'excluidas_palabra': 0,
+            'excluidas_cliente': 0,
             'excluidas_invalidas': 0
         }
         
@@ -336,7 +490,8 @@ if uploaded_files:
             
             # Acumular estadísticas
             stats_totales['conservadas'] += resultado['stats']['conservadas']
-            stats_totales['excluidas_persona'] += resultado['stats']['excluidas_persona']
+            stats_totales['excluidas_palabra'] += resultado['stats']['excluidas_palabra']
+            stats_totales['excluidas_cliente'] += resultado['stats']['excluidas_cliente']
             stats_totales['excluidas_invalidas'] += resultado['stats']['excluidas_invalidas']
         
         progress_bar.progress(1.0)
@@ -347,7 +502,7 @@ if uploaded_files:
         # Mostrar estadísticas
         st.subheader("📊 3. Resultados")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             st.metric(
@@ -357,14 +512,23 @@ if uploaded_files:
         
         with col2:
             st.metric(
-                "🚫 Excluidos (Persona/Consumidor)",
-                f"{stats_totales['excluidas_persona']:,}"
+                "🚫 Excluidos (Palabras)",
+                f"{stats_totales['excluidas_palabra']:,}",
+                help="PERSONA, CONSUMIDOR, MULTIPOS"
             )
         
         with col3:
             st.metric(
-                "🗑️ Excluidos (Filas inválidas)",
-                f"{stats_totales['excluidas_invalidas']:,}"
+                "🚫 Excluidos (Clientes)",
+                f"{stats_totales['excluidas_cliente']:,}",
+                help="Clientes específicos AR/BR"
+            )
+        
+        with col4:
+            st.metric(
+                "🗑️ Excluidos (Inválidos)",
+                f"{stats_totales['excluidas_invalidas']:,}",
+                help="Filas vacías o con pocos datos"
             )
         
         # Estadísticas por país
@@ -373,14 +537,24 @@ if uploaded_files:
         df_stats = pd.DataFrame([
             {
                 'País': r['entidad'],
-                'Registros': f"{r['stats']['conservadas']:,}",
-                'Excluidos Persona': f"{r['stats']['excluidas_persona']:,}",
+                'Conservados': f"{r['stats']['conservadas']:,}",
+                'Excluidos Palabras': f"{r['stats']['excluidas_palabra']:,}",
+                'Excluidos Clientes': f"{r['stats']['excluidas_cliente']:,}",
                 'Excluidos Inválidos': f"{r['stats']['excluidas_invalidas']:,}"
             }
             for r in resultados
         ])
         
         st.dataframe(df_stats, use_container_width=True, hide_index=True)
+        
+        # Mostrar razones detalladas de exclusión
+        with st.expander("📋 Detalle de exclusiones por razón", expanded=False):
+            for resultado in resultados:
+                st.markdown(f"**{resultado['entidad']}:**")
+                razones = resultado['stats']['razones_exclusion']
+                for razon, cantidad in sorted(razones.items(), key=lambda x: x[1], reverse=True):
+                    st.write(f"• {razon}: {cantidad:,} registros")
+                st.divider()
         
         st.divider()
         
@@ -413,19 +587,37 @@ if uploaded_files:
         
         st.success("✅ ¡Consolidación completada exitosamente!")
         
-        # Mostrar preview
+        # Vista previa SIN ERRORES
         with st.expander("👁️ Vista previa de datos", expanded=False):
             if resultados:
-                # Crear dataframe para preview
-                preview_data = []
-                for resultado in resultados[:3]:  # Máximo 3 países
-                    for fila in resultado['filas'][:10]:  # Máximo 10 filas por país
-                        preview_data.append(fila)
-                
-                if preview_data:
-                    df_preview = pd.DataFrame(preview_data, columns=resultados[0]['headers'])
-                    st.dataframe(df_preview.head(50), use_container_width=True)
-                    st.caption("Mostrando las primeras 50 filas del resultado consolidado")
+                try:
+                    # Crear dataframe para preview de manera segura
+                    preview_data = []
+                    headers_para_preview = resultados[0]['headers']
+                    
+                    for resultado in resultados[:3]:  # Máximo 3 países
+                        for fila in resultado['filas'][:10]:  # Máximo 10 filas por país
+                            # Asegurar que la fila tenga la cantidad correcta de columnas
+                            fila_ajustada = list(fila)
+                            while len(fila_ajustada) < len(headers_para_preview):
+                                fila_ajustada.append("")
+                            preview_data.append(fila_ajustada[:len(headers_para_preview)])
+                    
+                    if preview_data:
+                        # Crear DataFrame de manera segura
+                        df_preview = pd.DataFrame(preview_data, columns=headers_para_preview)
+                        
+                        # Verificar que no hay columnas duplicadas
+                        if df_preview.columns.duplicated().any():
+                            st.warning("⚠️ Se detectaron columnas duplicadas. Mostrando solo las primeras 5 columnas:")
+                            st.dataframe(df_preview.iloc[:, :5].head(20), use_container_width=True)
+                        else:
+                            st.dataframe(df_preview.head(50), use_container_width=True)
+                        
+                        st.caption("Mostrando muestra del resultado consolidado")
+                        
+                except Exception as e:
+                    st.warning(f"⚠️ No se pudo mostrar la vista previa, pero el archivo se descargó correctamente.")
 
 else:
     st.info("👆 Por favor, sube uno o más archivos para comenzar")
@@ -434,6 +626,6 @@ else:
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 0.9em;'>
-    🌎 Consolidador de Aging v1.0 | Desarrollado con Streamlit
+    🌎 Consolidador de Aging v1.2 - CON EXCLUSIONES AMPLIADAS | Desarrollado con Streamlit
 </div>
 """, unsafe_allow_html=True)
