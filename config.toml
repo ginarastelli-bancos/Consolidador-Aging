@@ -1,0 +1,25 @@
+[server]
+# Aumentar límite de carga de archivos de 200MB a 1GB
+maxUploadSize = 1000
+
+# Aumentar tamaño máximo de mensaje
+maxMessageSize = 1000
+
+# Habilitar CORS si es necesario
+enableCORS = false
+
+# Tiempo máximo de ejecución (en segundos)
+# Por defecto es 300 (5 minutos), aumentamos a 3600 (1 hora)
+maxRequestSize = 1000
+
+[browser]
+# Evitar que se recargue automáticamente
+gatherUsageStats = false
+
+[theme]
+# Tema opcional (puedes comentar si no quieres personalizar)
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+font = "sans serif"
